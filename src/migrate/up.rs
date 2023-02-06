@@ -1,8 +1,10 @@
-pub const MIGRATIONS: &'static [&'static str] = &[r#"
-    CREATE TABLE IF NOT EXISTS checks (
+pub const MIGRATIONS: &[&str] = &[r#"
+    CREATE TABLE IF NOT EXISTS statuses (
         id TEXT NOT NULL,
-        url TEXT NOT NULL,
-        frequency INTEGER CHECK(frequency IN (5, 15, 30, 90)),
+        series TEXT NOT NULL,
+        status INTEGER NOT NULL,
+        time INTEGER NOT NULL,
         PRIMARY KEY (`id`)
     );
+    CREATE INDEX `series_idx` ON `series`;
 "#];

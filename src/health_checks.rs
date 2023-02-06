@@ -1,73 +1,85 @@
-use std::sync::Arc;
+use std::time::SystemTime;
 
-use tokio::sync::Mutex;
+use anyhow::{bail, Result};
+
 use tokio::time;
 use tokio::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 pub mod repo;
+use repo::Repo;
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct Config {
+    endpoints: Vec<Endpoint>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct Endpoint {
+    series: String,
+    url: String,
+    interval: u16,
+}
 
 // The service with all the fun logic
 pub struct Service {
-    repo: Mutex<repo::Repo>,
+    endpoints_15: Vec<Endpoint>,
+    repo: Repo,
 }
 
 impl Service {
-    pub fn new(repo: repo::Repo) -> Self {
+    pub fn new(cfg: Config, repo: repo::Repo) -> Self {
+        // TODO: Ensure that each endpoint matches a supported interval
         Self {
-            repo: Mutex::new(repo),
+            endpoints_15: cfg.endpoints,
+            repo,
         }
     }
 
     // Starts routines for each health check frequency
-    //
-    // TODO: Need to start for the others
-    pub async fn start_check_routines(self) {
-        let self_rc = Arc::new(self);
+    pub async fn start_check_routines(self) -> Result<()> {
+        println!("{:?}", self.endpoints_15);
 
-        let fifteen = Arc::new(Mutex::new(Vec::new()));
-
-        // Routine to update the check vectors
-        let refresher = self_rc.clone();
-        let ref_15 = fifteen.clone();
-        let handle = tokio::spawn(async move {
-            let mut interval = time::interval(Duration::from_millis(15_000));
-            loop {
-                interval.tick().await; // Waits until 15s have passed
-                let checks = refresher
-                    .repo
-                    .lock()
-                    .await
-                    .fetch_checks(15)
-                    .expect("error getting 15s checks");
-
-                println!("15s checks: {:?}", checks);
-
-                let mut lock = ref_15.lock().await;
-                *lock = checks;
-            }
-        });
-
-        let call_15 = fifteen.clone();
-        tokio::spawn(async move {
+        let handle_15 = tokio::spawn(async move {
             let mut interval = time::interval(Duration::from_millis(15_000));
             loop {
                 interval.tick().await; // Waits until 15s have passed
 
                 // Loop through each and try to call out
-                let mut lock = call_15.lock().await;
-                for check in &*lock {
-                    let resp = reqwest::get(&check.url).await;
-                    if let Err(err) = resp {
-                        println!("{}", format!("error calling to {}: {}", check.url, err));
-                        continue;
-                    }
+                for check in &self.endpoints_15 {
+                    let resp = match reqwest::get(&check.url).await {
+                        Ok(v) => v,
+                        Err(err) => {
+                            println!("error checking {}: {}", check.url, err);
+                            continue;
+                        }
+                    };
 
-                    let response = resp.unwrap();
-                    println!("response code was: {:?}", response.status());
+                    // Insert into the db
+                    self.repo
+                        .store_status(&repo::Status {
+                            id: String::new(),
+                            series: check.series.clone(),
+                            status: resp.status().as_u16(),
+                            time: SystemTime::now()
+                                .duration_since(SystemTime::UNIX_EPOCH)?
+                                .as_secs(),
+                        })
+                        .await?;
                 }
             }
+
+            // For infering the result type
+            #[allow(unreachable_code)]
+            Ok::<(), anyhow::Error>(())
         });
 
-        handle.await;
+        tokio::join!(handle_15)
+            .0
+            .expect("Did not want a join error")
+            .unwrap();
+
+        Ok(())
     }
 }

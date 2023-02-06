@@ -1,0 +1,4 @@
+endpoints:
+  - series: google
+    url: https://google.com
+    interval: 15
