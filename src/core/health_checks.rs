@@ -1,48 +1,37 @@
+use std::sync::Arc;
 use std::time::SystemTime;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 
 use tokio::time;
 use tokio::time::Duration;
 
-use serde::{Deserialize, Serialize};
-
-pub mod repo;
-use repo::Repo;
-
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
-pub struct Config {
-    endpoints: Vec<Endpoint>,
-}
-
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
-pub struct Endpoint {
-    series: String,
-    url: String,
-    interval: u16,
-}
+use crate::core;
+use crate::{Endpoint, ValidatedConfig};
 
 // The service with all the fun logic
 pub struct Service {
     endpoints_15: Vec<Endpoint>,
-    repo: Repo,
+    repo: core::Repo,
 }
 
 impl Service {
-    pub fn new(cfg: Config, repo: repo::Repo) -> Self {
-        // TODO: Ensure that each endpoint matches a supported interval
+    pub fn new(cfg: ValidatedConfig, repo: core::Repo) -> Self {
         Self {
-            endpoints_15: cfg.endpoints,
+            endpoints_15: cfg
+                .0
+                .endpoints
+                .into_iter()
+                .filter(|e| e.interval == 15)
+                .collect(),
             repo,
         }
     }
 
     // Starts routines for each health check frequency
-    pub async fn start_check_routines(self) -> Result<()> {
-        println!("{:?}", self.endpoints_15);
-
+    pub async fn start_check_routines(self: Arc<Self>) -> Result<()> {
         let handle_15 = tokio::spawn(async move {
-            let mut interval = time::interval(Duration::from_millis(15_000));
+            let mut interval = time::interval(Duration::from_secs(1));
             loop {
                 interval.tick().await; // Waits until 15s have passed
 
@@ -58,7 +47,7 @@ impl Service {
 
                     // Insert into the db
                     self.repo
-                        .store_status(&repo::Status {
+                        .store_status(&core::Status {
                             id: String::new(),
                             series: check.series.clone(),
                             status: resp.status().as_u16(),
@@ -82,4 +71,7 @@ impl Service {
 
         Ok(())
     }
+
+    // Given a list of checks, it runs them each in a new task
+    async fn execute_checks(checks: Vec<Endpoint>) {}
 }

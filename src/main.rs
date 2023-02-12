@@ -1,13 +1,15 @@
+use std::sync::Arc;
 use std::{error::Error, fs};
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Arg, Command};
 use rusqlite::params;
+use serde::{Deserialize, Serialize};
 
 use git_version::git_version;
 const GIT_VERSION: &str = git_version!();
 
-mod health_checks;
+mod core;
 mod migrate;
 mod server;
 
@@ -40,28 +42,31 @@ async fn main() -> Result<()> {
 
     match matches.subcommand() {
         Some(("start", start_matches)) => {
-            // let port: u16 = start_matches
-            //     .get_one::<String>("port")
-            //     .ok_or_else(|| anyhow!("port is required"))?
-            //     .parse()?;
+            let port: u16 = start_matches
+                .get_one::<String>("port")
+                .ok_or_else(|| anyhow!("port is required"))?
+                .parse()?;
 
             // Get the config to pass to the service
             let config_location = start_matches
                 .get_one::<String>("config")
                 .ok_or_else(|| anyhow!("config location required"))?;
             let yaml = fs::read_to_string(config_location).context("unable to read config file")?;
-            let cfg: health_checks::Config =
-                serde_yaml::from_str(&yaml).context("error deserializing config")?;
+            let cfg: Config = serde_yaml::from_str(&yaml).context("error deserializing config")?;
+            let valid_config = cfg.validate()?;
 
-            // tokio::spawn(async move {
-            //     server::start_server(port).await;
-            // });
-
+            // Create the service
             let conn = connect_to_db("./db.sqlite").expect("error opening db");
-            let repo = health_checks::repo::Repo::new(conn);
+            let repo = core::Repo::new(conn);
 
-            let service = health_checks::Service::new(cfg, repo);
-            service.start_check_routines().await?;
+            let service = Arc::new(core::Service::new(valid_config, repo));
+
+            let server_service = service.clone();
+            tokio::spawn(async move {
+                server::start_server(port, server_service.clone()).await;
+            });
+
+            service.clone().start_check_routines().await?;
         }
         Some(("migrate", _)) => {
             let conn = connect_to_db("./db.sqlite").unwrap();
@@ -79,3 +84,24 @@ async fn main() -> Result<()> {
 fn connect_to_db(file_name: &str) -> Result<rusqlite::Connection, Box<dyn Error>> {
     Ok(rusqlite::Connection::open(file_name)?)
 }
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct Config {
+    endpoints: Vec<Endpoint>,
+}
+
+impl Config {
+    pub fn validate(self) -> Result<ValidatedConfig> {
+        // TODO
+        Ok(ValidatedConfig(self))
+    }
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct Endpoint {
+    series: String,
+    url: String,
+    interval: u16,
+}
+
+pub struct ValidatedConfig(Config);

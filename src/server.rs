@@ -4,16 +4,22 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::sync::Arc;
 
-pub async fn start_server(port: u16) {
+use crate::core::Service;
+
+pub async fn start_server(port: u16, service: Arc<Service>) {
     tracing_subscriber::fmt::init();
 
     // Some details about the server starting up
     let state = ServerState {
         start_time: SystemTime::now(),
+        service,
     };
 
-    let api_router = Router::new().route("/healthz", get(health_check));
+    let api_router = Router::new()
+        .route("/healthz", get(health_check))
+        .route("/series", get(list_series));
 
     let app = Router::new().nest("/api/", api_router).with_state(state);
 
@@ -28,6 +34,7 @@ pub async fn start_server(port: u16) {
 #[derive(Clone)]
 struct ServerState {
     start_time: SystemTime,
+    service: Arc<Service>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -49,4 +56,5 @@ async fn health_check(State(state): State<ServerState>) -> impl IntoResponse {
     )
 }
 
-async fn list_checks() {}
+// Lists all series configured and their latest status
+async fn list_series<'a>(State(state): State<ServerState>) -> impl IntoResponse {}
