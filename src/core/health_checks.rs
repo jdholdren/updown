@@ -6,72 +6,90 @@ use anyhow::Result;
 use tokio::time;
 use tokio::time::Duration;
 
-use crate::core;
-use crate::{Endpoint, ValidatedConfig};
+use crate::core::Repo;
+use crate::Endpoint;
+
+use super::repo::CreateStatus;
+use super::time_wheel::TimingWheel;
+use super::Status;
 
 // The service with all the fun logic
 pub struct Service {
-    endpoints_15: Vec<Endpoint>,
-    repo: core::Repo,
+    repo: Repo,
+    pub endpoints: Vec<Endpoint>,
 }
 
 impl Service {
-    pub fn new(cfg: ValidatedConfig, repo: core::Repo) -> Self {
-        Self {
-            endpoints_15: cfg
-                .0
-                .endpoints
-                .into_iter()
-                .filter(|e| e.interval == 15)
-                .collect(),
-            repo,
-        }
+    pub fn new(repo: Repo, endpoints: Vec<Endpoint>) -> Self {
+        Self { repo, endpoints }
     }
 
     // Starts routines for each health check frequency
-    pub async fn start_check_routines(self: Arc<Self>) -> Result<()> {
-        let handle_15 = tokio::spawn(async move {
-            let mut interval = time::interval(Duration::from_secs(1));
-            loop {
-                interval.tick().await; // Waits until 15s have passed
+    pub async fn start_check_routines(self: Arc<Self>) {
+        // Set up the initial set of endpoints in the timing wheel
+        let mut tw: TimingWheel<Endpoint> = Default::default();
+        schedule_endpoints(&mut tw, self.endpoints.to_vec());
 
-                // Loop through each and try to call out
-                for check in &self.endpoints_15 {
-                    let resp = match reqwest::get(&check.url).await {
-                        Ok(v) => v,
-                        Err(err) => {
-                            println!("error checking {}: {}", check.url, err);
-                            continue;
-                        }
-                    };
+        let mut interval = time::interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await; // Waits until 15s have passed
 
-                    // Insert into the db
-                    self.repo
-                        .store_status(&core::Status {
-                            id: String::new(),
-                            series: check.series.clone(),
-                            status: resp.status().as_u16(),
-                            time: SystemTime::now()
-                                .duration_since(SystemTime::UNIX_EPOCH)?
-                                .as_secs(),
-                        })
-                        .await?;
-                }
+            // Tick the wheel forward. It'll return any endpoints that we need to check.
+            // Since these are continuously being checked at an interval, immediately reschedule
+            // them according to their interval.
+            let to_run = tw.tick();
+
+            // Schedule a task for each endpoint
+            for endpoint in to_run.iter() {
+                let service = self.clone();
+                let endpoint = endpoint.clone();
+                tokio::spawn(
+                    async move { service.execute_check(endpoint.series, endpoint.url).await },
+                );
             }
 
-            // For infering the result type
-            #[allow(unreachable_code)]
-            Ok::<(), anyhow::Error>(())
-        });
-
-        tokio::join!(handle_15)
-            .0
-            .expect("Did not want a join error")
-            .unwrap();
-
-        Ok(())
+            // Put them back
+            schedule_endpoints(&mut tw, to_run);
+        }
     }
 
     // Given a list of checks, it runs them each in a new task
-    async fn execute_checks(checks: Vec<Endpoint>) {}
+    async fn execute_check(&self, series_name: String, url: String) {
+        let start = SystemTime::now();
+
+        let resp = match reqwest::get(url).await {
+            Err(err) => {
+                tracing::error!("error performing request: {}", err);
+                return;
+            }
+            Ok(resp) => resp,
+        };
+        let end = SystemTime::now();
+        let duration_ms = end
+            .duration_since(start)
+            .expect("we went backwards in time")
+            .as_millis() as u64;
+
+        let status = CreateStatus {
+            series: series_name,
+            status: resp.status().into(),
+            start,
+            duration_ms,
+        };
+        if let Err(err) = self.repo.store_status(status).await {
+            tracing::error!("error storing status: {}", err);
+        }
+    }
+
+    // Lists statuses from the given time until the to time
+    pub async fn list_statuses(self: Arc<Self>, from: u64, to: u64) -> Result<Vec<Status>> {
+        self.repo.fetch_statuses(from, to).await
+    }
+}
+
+fn schedule_endpoints(tw: &mut TimingWheel<Endpoint>, endpoints: Vec<Endpoint>) {
+    for endpoint in endpoints {
+        let seconds_from_now = endpoint.interval as usize; // Getting around a move below
+        tw.add(endpoint, seconds_from_now);
+    }
 }

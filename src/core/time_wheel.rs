@@ -1,5 +1,3 @@
-use std::char::MAX;
-
 /// A simple implementation of a timing wheel
 ///
 /// Just call tick and it will return anything needing to be run at
@@ -30,7 +28,7 @@ impl<T> Default for TimingWheel<T> {
     }
 }
 
-impl<T: Copy> TimingWheel<T> {
+impl<T> TimingWheel<T> {
     pub fn add(&mut self, t: T, seconds_from_now: usize) {
         let sum = self.current_tick + seconds_from_now;
         let index = sum % MAX_TICKS;

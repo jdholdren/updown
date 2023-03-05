@@ -19,7 +19,7 @@ async fn main() -> Result<()> {
         .bin_name("updown")
         .subcommand_required(true)
         .subcommand(
-            Command::new("start")
+            Command::new("httpd")
                 .about("starts the server")
                 .arg(
                     Arg::new("port")
@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
         .get_matches();
 
     match matches.subcommand() {
-        Some(("start", start_matches)) => {
+        Some(("httpd", start_matches)) => {
             let port: u16 = start_matches
                 .get_one::<String>("port")
                 .ok_or_else(|| anyhow!("port is required"))?
@@ -53,21 +53,21 @@ async fn main() -> Result<()> {
                 .ok_or_else(|| anyhow!("config location required"))?;
             let yaml = fs::read_to_string(config_location).context("unable to read config file")?;
             let cfg: Config = serde_yaml::from_str(&yaml).context("error deserializing config")?;
-            let valid_config = cfg.validate()?;
 
             // Create the service
             let conn = connect_to_db("./db.sqlite").expect("error opening db");
             let repo = core::Repo::new(conn);
 
-            let service = Arc::new(core::Service::new(valid_config, repo));
+            let service = Arc::new(core::Service::new(repo, cfg.endpoints));
 
             let server_service = service.clone();
             tokio::spawn(async move {
-                server::start_server(port, server_service.clone()).await;
+                server::start_server(port, server_service).await;
             });
 
-            service.clone().start_check_routines().await?;
+            service.clone().start_check_routines().await;
         }
+        // When you're trying to migrate
         Some(("migrate", _)) => {
             let conn = connect_to_db("./db.sqlite").unwrap();
 
@@ -97,7 +97,7 @@ impl Config {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct Endpoint {
     series: String,
     url: String,

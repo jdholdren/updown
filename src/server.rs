@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::core::Service;
+use crate::Endpoint;
 
 pub async fn start_server(port: u16, service: Arc<Service>) {
     tracing_subscriber::fmt::init();
@@ -19,7 +20,7 @@ pub async fn start_server(port: u16, service: Arc<Service>) {
 
     let api_router = Router::new()
         .route("/healthz", get(health_check))
-        .route("/series", get(list_series));
+        .route("/series", get(list_endpoint_checks));
 
     let app = Router::new().nest("/api/", api_router).with_state(state);
 
@@ -56,5 +57,14 @@ async fn health_check(State(state): State<ServerState>) -> impl IntoResponse {
     )
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct ListSeriesResponse {
+    series: Vec<Endpoint>,
+}
+
 // Lists all series configured and their latest status
-async fn list_series<'a>(State(state): State<ServerState>) -> impl IntoResponse {}
+async fn list_endpoint_checks(State(state): State<ServerState>) -> impl IntoResponse {
+    Json(ListSeriesResponse {
+        series: state.service.endpoints.to_vec(),
+    })
+}
